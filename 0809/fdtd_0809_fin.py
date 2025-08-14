@@ -9,13 +9,13 @@ import sys
 from tqdm import tqdm
 
 ### ▼▼▼ 設定項目 ▼▼▼ ###
-stl_path = r'C:\Users\N-ONE\projects\shape_data\sample.stl'
+stl_path = r'C:\Users\N-ONE\projects\shape_data\sample1_vect_out.stl'
 absorption_path = r'C:\Users\N-ONE\projects\shape_data\absorption_data.json'
 output_path = r'C:\Users\N-ONE\projects\animation_data\sound_animation_stable.mp4'
-dx = dy = dz = 0.005
+dx = dy = dz = 0.01
 tmax = 0.003
 # 物理座標としての音源位置は固定
-x_source, y_source, z_source = 0.05, 0.05, 0.05
+x_source, y_source, z_source = 0.5, 0.5, 0.5
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
 # --- 物理定数 ---

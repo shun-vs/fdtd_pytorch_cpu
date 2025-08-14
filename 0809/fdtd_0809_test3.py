@@ -9,7 +9,7 @@ import sys
 from tqdm import tqdm
 
 ### ▼▼▼ 設定項目 ▼▼▼ ###
-stl_path = r'C:\Users\N-ONE\projects\shape_data\sample1_ver2.stl'
+stl_path = r'C:\Users\N-ONE\projects\shape_data\sample.stl'
 absorption_path = r'C:\Users\N-ONE\projects\shape_data\absorption_data.json' # 非対称な吸音率ファイル
 output_path = r'C:\Users\N-ONE\projects\animation_data\sound_animation_final_corrected.mp4'
 
