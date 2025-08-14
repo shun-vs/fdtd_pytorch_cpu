@@ -37,9 +37,11 @@ output_path = r'./sound_animation_obstacles.mp4'
 
 # --- デバッグ用 ---
 show_debug_visualization = True # Trueにするとデバッグ用の3Dビューアを起動
-show_meshes_in_debug = True # Trueにすると障害物のメッシュを表示
-show_points_in_debug = True # Trueにすると障害物のメッシュと境界点を表示\
-show_id_grid_animation = True # TrueにするとIDマスクのスライスビューアを起動
+show_meshes_in_debug = False # Trueにすると3Dビューアでメッシュを表示
+show_points_in_debug = True # 3Dビューアで境界点を表示するか
+show_boundary_points_in_debug = True # 3Dビューアで境界点（赤球）を表示するか
+show_source_point_in_debug = True   # 3Dビューアで音源点（青球）を表示するか
+show_id_grid_animation = False # TrueにするとIDマスクのスライスビューアを起動
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
 
@@ -102,12 +104,12 @@ for k_start in tqdm(range(0, nz, slice_depth), desc="Voxelizing Slices"):
         mask_slice = mesh.contains(grid_points_slice).reshape(nx, ny, -1)
         object_id_grid[:, :, k_start:k_end][mask_slice] = obj_id
 
-### ▼▼▼ 新しいマスクの定義 ▼▼▼ ###
+#  領域のIDを設定
 # 「空気」領域(ID=0)を計算対象とする
 inside_mask = (object_id_grid == 0)
 # 「障害物」領域
 solid_mask = (object_id_grid > 0)
-### ▲▲▲ 修正完了 ▲▲▲ ###
+
 
 # 境界マスクの生成（空気と障害物の界面）
 eroded_mask = np.pad(inside_mask, pad_width=1, mode='constant', constant_values=False)
@@ -157,11 +159,66 @@ for data in tqdm(all_meshes_data, desc="Mapping Normals"):
 print("ジオメトリ準備完了。")
 
 
+# --- 計算条件の表示と確認 ---
+print("-" * 50)
+print("--- シミュレーション条件の確認 ---")
+print(f"空間ステップ (dx, dy, dz): ({dx}, {dy}, {dz}) m")
+print(f"グリッドサイズ (nx, ny, nz): ({nx}, {ny}, {nz})")
+
+print(f"時間ステップ数 (tx): {tx}")
+print(f"時間ステップ (dt): {dt:.6f} s")
+print(f"計算時間 (tmax): {tmax:.6f} s")
+
+print(f"グリッド原点: {grid_origin}")
+print(f"グリッド範囲: X=[{x[0]}, {x[-1]}] m, Y=[{y[0]}, {y[-1]}] m, Z=[{z[0]}, {z[-1]}] m")
+
+print(f"音速 (c0): {c0} m/s")
+
+cfl_number = c0 * dt * np.sqrt(1/dx**2 + 1/dy**2 + 1/dz**2)
+print(f"クーラン数 (CFL Number): {cfl_number:.4f}")
+if cfl_number > 1:
+    print("\n警告: 安定条件を満たしていません。")
+    sys.exit()
+else:
+    print("-> 安定条件を満たしています。")
+    
+points_per_wavelength = 20
+max_freq = c0 / (dx * points_per_wavelength)
+print(f"計算可能な最大周波数 (1波長あたり{points_per_wavelength}点): {max_freq:.2f} Hz")
+
+print("--- 音源設定 ---")
+ix_source_req = int(round((x_source - grid_origin[0]) / dx))
+iy_source_req = int(round((y_source - grid_origin[1]) / dy))
+iz_source_req = int(round((z_source - grid_origin[2]) / dz))
+print(f"要求された音源インデックス: ({ix_source_req}, {iy_source_req}, {iz_source_req})")
+is_in_bounds = (0 <= ix_source_req < nx) and (0 <= iy_source_req < ny) and (0 <= iz_source_req < nz)
+if not is_in_bounds or not inside_mask[ix_source_req, iy_source_req, iz_source_req]:
+    if not is_in_bounds: print("警告: 要求された音源位置がグリッド範囲外です。")
+    else: print("警告: 要求された音源位置が形状の外部（空気領域外）です。")
+    print("-> 最も近い内部点（空気領域内）を自動的に探索します...")
+    inside_indices = np.argwhere(inside_mask)
+    if len(inside_indices) == 0: print("エラー: 内部点が一つも見つかりませんでした。"); sys.exit()
+    req_point = np.array([ix_source_req, iy_source_req, iz_source_req])
+    distances_sq = np.sum((inside_indices - req_point)**2, axis=1)
+    min_dist_idx = np.argmin(distances_sq)
+    ix_source, iy_source, iz_source = inside_indices[min_dist_idx]
+    print(f"-> 新しい音源インデックスが設定されました: ({ix_source}, {iy_source}, {iz_source})")
+else:
+    ix_source, iy_source, iz_source = ix_source_req, iy_source_req, iz_source_req
+    print(f"-> 音源は正常に内部（空気領域内）に設定されました: ({ix_source}, {iy_source}, {iz_source})")
+
+print("-" * 50)
+input("Enterキーを押してデバックビューアーに移ります...")
+
+
+# --- デバッグ用の3Dビューア ---
 if show_debug_visualization:
     print("\nデバッグ用の3Dビューアを起動します。ウィンドウを閉じると次に進みます。")
-    scene = tri.Scene()
-    axis = tri.creation.axis(origin_size=0.05)
-    scene.add_geometry(axis)
+    
+    geometries_to_show = []
+    axis = tri.creation.axis(origin_size=0.01)
+    geometries_to_show.append(axis)
+
     if show_meshes_in_debug:
         for data in all_meshes_data:
             mesh = data["mesh"]
@@ -170,14 +227,24 @@ if show_debug_visualization:
             colors_array = np.tile(rgba_int, (len(mesh.faces), 1))
             mesh.visual.face_colors = colors_array
             mesh.visual.face_colors[:, 3] = 120
-            scene.add_geometry(mesh)
-    if show_points_in_debug:
+            geometries_to_show.append(mesh)
+
+    if show_boundary_points_in_debug:
         boundary_voxels_coords = boundary_voxels_indices * np.array([dx, dy, dz]) + grid_origin
-        boundary_points_vis = tri.points.PointCloud(boundary_voxels_coords, colors=[255, 0, 0, 200])
-        scene.add_geometry(boundary_points_vis)
-    if scene.geometry:
-        scene.show()
+        boundary_vis = tri.points.PointCloud(boundary_voxels_coords, colors=[255, 0, 0, 200])
+        geometries_to_show.append(boundary_vis)
         
+    if show_source_point_in_debug:
+        source_coord = np.array([ix_source, iy_source, iz_source]) * np.array([dx, dy, dz]) + grid_origin
+        source_vis = tri.primitives.Sphere(radius=dx*2, center=source_coord)
+        source_vis.visual.face_colors = [255, 255, 0, 200]
+        geometries_to_show.append(source_vis)
+
+    if geometries_to_show:
+        scene = tri.Scene(geometries_to_show)
+        scene.show()
+
+
 if show_id_grid_animation:
     print("\nIDマスクのインタラクティブビューアを起動します。ウィンドウを閉じると次に進みます。")
     
@@ -225,6 +292,8 @@ if show_id_grid_animation:
     
     plt.show()
 
+input("上記の条件でよろしければ、Enterキーを押して計算を開始してください...")
+print("\n計算を開始します...")
 
 # --- 4. FDTD計算の初期化 ---
 vx_update_mask = inside_mask[1:nx] & inside_mask[:nx-1]
@@ -236,47 +305,6 @@ p = np.zeros(grid_shape)
 vx = np.zeros((nx + 1, ny, nz))
 vy = np.zeros((nx, ny + 1, nz))
 vz = np.zeros((nx, ny, nz + 1))
-ix_source = int(round((x_source - grid_origin[0]) / dx))
-iy_source = int(round((y_source - grid_origin[1]) / dy))
-iz_source = int(round((z_source - grid_origin[2]) / dz))
-if not (0 <= ix_source < nx and 0 <= iy_source < ny and 0 <= iz_source < nz):
-    print(f"音源位置 ({x_source}, {y_source}, {z_source}) m がグリッド外です。")
-    print("音源位置がグリッド外です。計算を終了します。")
-    sys.exit()
-
-# --- 計算条件の表示と確認 ---
-print("-" * 50)
-print("--- シミュレーション条件の確認 ---")
-print(f"空間ステップ (dx, dy, dz): ({dx}, {dy}, {dz}) m")
-print(f"グリッドサイズ (nx, ny, nz): ({nx}, {ny}, {nz})")
-
-print(f"時間ステップ数 (tx): {tx}")
-print(f"時間ステップ (dt): {dt:.6f} s")
-print(f"計算時間 (tmax): {tmax:.6f} s")
-
-print(f"音源位置 (x, y, z): ({x_source}, {y_source}, {z_source}) m")
-print(f"音源グリッド位置 (ix, iy, iz): ({int(round((x_source - grid_origin[0]) / dx))}, {int(round((y_source - grid_origin[1]) / dy))}, {int(round((z_source - grid_origin[2]) / dz))})")
-
-print(f"グリッド原点: {grid_origin}")
-print(f"グリッド範囲: X=[{x[0]}, {x[-1]}] m, Y=[{y[0]}, {y[-1]}] m, Z=[{z[0]}, {z[-1]}] m")
-
-print(f"音速 (c0): {c0} m/s")
-
-cfl_number = c0 * dt * np.sqrt(1/dx**2 + 1/dy**2 + 1/dz**2)
-print(f"クーラン数 (CFL Number): {cfl_number:.4f}")
-if cfl_number > 1:
-    print("\n警告: 安定条件を満たしていません。")
-    sys.exit()
-else:
-    print("-> 安定条件を満たしています。")
-    
-points_per_wavelength = 20
-max_freq = c0 / (dx * points_per_wavelength)
-print(f"計算可能な最大周波数 (1波長あたり{points_per_wavelength}点): {max_freq:.2f} Hz")
-print("-" * 50)
-input("上記の条件でよろしければ、Enterキーを押して計算を開始してください...")
-print("\n計算を開始します...")
-
 
 # --- 5. 可視化準備 ---
 fig, ax = plt.subplots(figsize=(8, 6))
