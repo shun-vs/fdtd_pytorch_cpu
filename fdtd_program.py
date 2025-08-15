@@ -16,10 +16,10 @@ shapes_to_load = [
         "stl_path": r'C:\Users\N-ONE\projects\shape_data\sample2_center_in.stl',
         "alpha": 0.1, # この物体の表面全体の吸音率
     },
-    {
-        "stl_path": r'C:\Users\N-ONE\projects\shape_data\sample2_center_out.stl',
-        "alpha": 0.8,
-    },
+    # {
+    #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\sample2_center_out.stl',
+    #     "alpha": 0.8,
+    # },
 ]
 
 # 計算領域全体の大きさ [m]
@@ -31,12 +31,12 @@ z_span = 1.0
 x_source, y_source, z_source = 0.3, 0.0, 0.0
 
 # グリッド、計算時間、出力ファイル
-dx = dy = dz = 0.01
-tmax = 0.001
+dx = dy = dz = 0.005
+tmax = 0.01
 output_path = r'./sound_animation_obstacles.mp4'
 
 # --- デバッグ用設定 ---
-show_debug_visualization = True # Trueにするとデバッグ用の3Dビューアを起動
+show_debug_visualization = False # Trueにするとデバッグ用の3Dビューアを起動
 view_mesh_as_wireframe = True # True:メッシュをワイヤーフレーム表示, False:半透明の面で表示
 show_meshes_in_debug = True # 3Dビューアで境界点を表示するか
 show_boundary_points_in_debug = False # 3Dビューアで境界点（赤球）を表示するか
@@ -157,6 +157,55 @@ for data in tqdm(all_meshes_data, desc="Mapping Normals"):
     normals_voxcel[indices_tuple] = mesh.face_normals[face_ids]
 
 print("ジオメトリ準備完了。")
+
+
+# --- 境界条件の高速化準備 (ベクトル化) ---
+print("境界条件の高速化のため、インデックスを事前計算します...")
+# 有効な境界点（インピーダンスが有限、法線が非ゼロ）のみを対象にする
+valid_boundary_mask_on_b_indices = (np.isfinite(impedance_grid[boundary_mask])) & \
+                                   (np.linalg.norm(normals_voxcel[boundary_mask], axis=1) > 1e-6)
+
+b_indices_valid = boundary_voxels_indices[valid_boundary_mask_on_b_indices]
+i, j, k = b_indices_valid.T
+
+# 有効な境界点に対応するプロパティを取得
+Z_b_valid = impedance_grid[i, j, k]
+normals_b_valid = normals_voxcel[i, j, k]
+n_hats_b_valid = normals_b_valid / np.linalg.norm(normals_b_valid, axis=1)[:, np.newaxis]
+
+# 各境界点がどの方向の固体に接しているかに基づいて、更新対象の速度グリッドインデックスを計算
+# +X方向の固体に接している境界点
+mask_solid_xp1 = (i < nx - 1) & (solid_mask[i + 1, j, k])
+vx_update_indices_p1 = (i[mask_solid_xp1] + 1, j[mask_solid_xp1], k[mask_solid_xp1])
+v_vec_indices_xp1 = np.where(mask_solid_xp1)[0]
+
+# -X方向の固体に接している境界点
+mask_solid_xm1 = (i > 0) & (solid_mask[i - 1, j, k])
+vx_update_indices_m1 = (i[mask_solid_xm1], j[mask_solid_xm1], k[mask_solid_xm1])
+v_vec_indices_xm1 = np.where(mask_solid_xm1)[0]
+
+# +Y方向の固体に接している境界点
+mask_solid_yp1 = (j < ny - 1) & (solid_mask[i, j + 1, k])
+vy_update_indices_p1 = (i[mask_solid_yp1], j[mask_solid_yp1] + 1, k[mask_solid_yp1])
+v_vec_indices_yp1 = np.where(mask_solid_yp1)[0]
+
+# -Y方向の固体に接している境界点
+mask_solid_ym1 = (j > 0) & (solid_mask[i, j - 1, k])
+vy_update_indices_m1 = (i[mask_solid_ym1], j[mask_solid_ym1], k[mask_solid_ym1])
+v_vec_indices_ym1 = np.where(mask_solid_ym1)[0]
+
+# +Z方向の固体に接している境界点
+mask_solid_zp1 = (k < nz - 1) & (solid_mask[i, j, k + 1])
+vz_update_indices_p1 = (i[mask_solid_zp1], j[mask_solid_zp1], k[mask_solid_zp1] + 1)
+v_vec_indices_zp1 = np.where(mask_solid_zp1)[0]
+
+# -Z方向の固体に接している境界点
+mask_solid_zm1 = (k > 0) & (solid_mask[i, j, k - 1])
+vz_update_indices_m1 = (i[mask_solid_zm1], j[mask_solid_zm1], k[mask_solid_zm1])
+v_vec_indices_zm1 = np.where(mask_solid_zm1)[0]
+
+# FDTDループ内で使うために、有効な境界点の音圧グリッドインデックスも準備
+p_b_indices_valid = (i, j, k)
 
 
 # --- 計算条件の表示と確認 ---
@@ -345,21 +394,29 @@ def update_frame(t):
     grad_p_z = (p[:, :, 1:nz] - p[:, :, :nz-1]) / dz
     vz[:, :, 1:nz][vz_update_mask] -= (dt / rho0) * grad_p_z[vz_update_mask]
 
-    # 順序2: 境界条件
-    for i, j, k in zip(*np.where(boundary_mask)):
-        Z = impedance_grid[i, j, k]
-        if not np.isfinite(Z): continue
-        normal = normals_voxcel[i, j, k]
-        if np.linalg.norm(normal) < 1e-6: continue
-        n_hat = normal / np.linalg.norm(normal)
-        v_normal_magnitude = p[i, j, k] / Z
-        v_normal_vector = v_normal_magnitude * n_hat
-        if i < nx - 1 and solid_mask[i + 1, j, k]: vx[i + 1, j, k] = v_normal_vector[0]
-        if i > 0 and solid_mask[i - 1, j, k]: vx[i, j, k] = v_normal_vector[0]
-        if j < ny - 1 and solid_mask[i, j + 1, k]: vy[i, j + 1, k] = v_normal_vector[1]
-        if j > 0 and solid_mask[i, j - 1, k]: vy[i, j, k] = v_normal_vector[1]
-        if k < nz - 1 and solid_mask[i, j, k + 1]: vz[i, j, k + 1] = v_normal_vector[2]
-        if k > 0 and solid_mask[i, j, k - 1]: vz[i, j, k] = v_normal_vector[2]
+    # 順序2: 境界条件 (ベクトル化)
+    # 有効な境界点における音圧を取得
+    p_at_boundary = p[p_b_indices_valid]
+    
+    # 法線方向の速度ベクトルを計算
+    v_normal_magnitude = p_at_boundary / Z_b_valid
+    v_normal_vectors = v_normal_magnitude[:, np.newaxis] * n_hats_b_valid
+    
+    # 対応する速度グリッドに一括で代入
+    if v_vec_indices_xp1.size > 0:
+        vx[vx_update_indices_p1] = v_normal_vectors[v_vec_indices_xp1, 0]
+    if v_vec_indices_xm1.size > 0:
+        vx[vx_update_indices_m1] = v_normal_vectors[v_vec_indices_xm1, 0]
+        
+    if v_vec_indices_yp1.size > 0:
+        vy[vy_update_indices_p1] = v_normal_vectors[v_vec_indices_yp1, 1]
+    if v_vec_indices_ym1.size > 0:
+        vy[vy_update_indices_m1] = v_normal_vectors[v_vec_indices_ym1, 1]
+        
+    if v_vec_indices_zp1.size > 0:
+        vz[vz_update_indices_p1] = v_normal_vectors[v_vec_indices_zp1, 2]
+    if v_vec_indices_zm1.size > 0:
+        vz[vz_update_indices_m1] = v_normal_vectors[v_vec_indices_zm1, 2]
 
     # 順序3: 音圧
     div_v_x = (vx[1:nx+1] - vx[:nx]) / dx
