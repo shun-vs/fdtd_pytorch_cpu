@@ -37,10 +37,10 @@ output_path = r'./sound_animation_obstacles.mp4'
 
 # --- デバッグ用 ---
 show_debug_visualization = True # Trueにするとデバッグ用の3Dビューアを起動
-show_meshes_in_debug = False # Trueにすると3Dビューアでメッシュを表示
+show_meshes_in_debug = True # Trueにすると3Dビューアでメッシュを表示
 show_points_in_debug = True # 3Dビューアで境界点を表示するか
-show_boundary_points_in_debug = True # 3Dビューアで境界点（赤球）を表示するか
-show_source_point_in_debug = True   # 3Dビューアで音源点（青球）を表示するか
+show_boundary_points_in_debug = False # 3Dビューアで境界点（赤球）を表示するか
+show_source_point_in_debug = True   # 3Dビューアで音源点（黄球）を表示するか
 show_id_grid_animation = False # TrueにするとIDマスクのスライスビューアを起動
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
@@ -53,8 +53,8 @@ dt = np.floor(1 / (c0 * np.sqrt(1/dx**2 + 1/dy**2 + 1/dz**2)) * 1e13) / 1e13
 tx = int(round(tmax / dt))
 
 # 音源信号の設定（ガウシアンパルス）
-t0 = 0.0015
-pin = 10*np.exp(-2e7 * (np.arange(tx) * dt - t0)**2)
+t0 = 0.0005
+pin = 10*np.exp(-3e7 * (np.arange(tx) * dt - t0)**2)
 
 # --- 3. ジオメトリの準備 ---
 print("\n--- ジオメトリ準備開始 ---")
