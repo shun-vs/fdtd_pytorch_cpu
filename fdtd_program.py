@@ -7,19 +7,38 @@ import matplotlib.animation as animation
 import trimesh as tri
 import sys
 from tqdm import tqdm
+from scipy.io import wavfile # WAVファイル読み込みに必要
+from scipy import signal      # リサンプリングに必要
 
 ### ▼▼▼ 1. 設定項目 ▼▼▼ ###
 # シミュレーションで読み込む形状と吸音率をリストで定義
 # シミュレーション空間内に配置する「障害物」のSTLファイルをリストで定義
 shapes_to_load = [
     {
-        "stl_path": r'C:\Users\N-ONE\projects\shape_data\sample2_center_in.stl',
+        "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_in.stl',
         "alpha": 0.1, # この物体の表面全体の吸音率
     },
-    # {
-    #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\sample2_center_out.stl',
-    #     "alpha": 0.8,
-    # },
+    {
+        "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_out.stl',
+        "alpha": 0.8,
+    },
+]
+
+# --- 音源の設定 (リスト形式) ---
+sources_to_load = [
+    {
+        "source_type": "gaussian",
+        "position": [0.3, 0.0, 0.0],  # 物理座標 [m]
+        "peak_time": 0.001,           # パルスのピーク時刻 [s]
+        "sharpness": 5e5,             # パルスの鋭さ
+        "amp_scale": 1.0              # 振幅スケール
+    },
+    {
+        "source_type": "wav",
+        "position": [-0.3, 0.0, 0.0], # 物理座標 [m]
+        "wav_path": r'C:\Users\N-ONE\projects\input_sound_data\exit_announce.wav', # .wavファイルのパス
+        "amp_scale": 1.0              # 振幅スケール
+    },
 ]
 
 # 計算領域全体の大きさ [m]
@@ -27,21 +46,18 @@ x_span = 1.0
 y_span = 1.0
 z_span = 1.0
 
-# 音源の物理座標 [m]
-x_source, y_source, z_source = 0.3, 0.0, 0.0
-
 # グリッド、計算時間、出力ファイル
-dx = dy = dz = 0.005
-tmax = 0.01
-output_path = r'./sound_animation_obstacles.mp4'
+dx = dy = dz = 0.01 # 空間ステップ [m]
+tmax = 0.5
+output_path = r'D:\FDTD_animation\test\fdtd_animation.mp4' # 出力ファイルのパス
 
 # --- デバッグ用設定 ---
-show_debug_visualization = False # Trueにするとデバッグ用の3Dビューアを起動
+show_debug_visualization = True # Trueにするとデバッグ用の3Dビューアを起動
 view_mesh_as_wireframe = True # True:メッシュをワイヤーフレーム表示, False:半透明の面で表示
 show_meshes_in_debug = True # 3Dビューアで境界点を表示するか
 show_boundary_points_in_debug = False # 3Dビューアで境界点（赤球）を表示するか
 show_source_point_in_debug = True   # 3Dビューアで音源点（黄球）を表示するか
-show_id_grid_animation = False # TrueにするとIDマスクのスライスビューアを起動
+show_id_grid_animation = True # TrueにするとIDマスクのスライスビューアを起動
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
 
@@ -156,8 +172,6 @@ for data in tqdm(all_meshes_data, desc="Mapping Normals"):
     indices_tuple = (current_obj_boundary_indices[:, 0], current_obj_boundary_indices[:, 1], current_obj_boundary_indices[:, 2])
     normals_voxcel[indices_tuple] = mesh.face_normals[face_ids]
 
-print("ジオメトリ準備完了。")
-
 
 # --- 境界条件の高速化準備 (ベクトル化) ---
 print("境界条件の高速化のため、インデックスを事前計算します...")
@@ -207,6 +221,114 @@ v_vec_indices_zm1 = np.where(mask_solid_zm1)[0]
 # FDTDループ内で使うために、有効な境界点の音圧グリッドインデックスも準備
 p_b_indices_valid = (i, j, k)
 
+print("ジオメトリ準備完了。")
+
+### ▼▼▼ 4. 音源波形の準備 ▼▼▼ ###
+def generate_gaussian_pulse(total_steps, dt, peak_time, sharpness, amp_scale=1.0):
+    """ガウシアンパルス波形を生成する関数"""
+    print("音源タイプ: ガウシアンパルス")
+    time_steps = np.arange(total_steps) * dt
+    pulse = np.exp(-sharpness * (time_steps - peak_time)**2)
+    return pulse
+
+def load_and_resample_wav(path, total_steps, dt, amp_scale=1.0):
+    """WAVファイルを読み込み、必要に応じてリサンプリングする関数"""
+    print(f"音源タイプ: WAVファイル ({path})")
+    try:
+        # WAVファイルを読み込み
+        fs_wav, wav_data = wavfile.read(path)
+        print(f"  - 元のサンプリング周波数: {fs_wav} Hz")
+
+        # ステレオの場合はモノラルに変換
+        if wav_data.ndim > 1:
+            wav_data = wav_data.mean(axis=1)
+        
+        # 振幅を[-1, 1]の範囲に正規化
+        wav_data = wav_data / np.max(np.abs(wav_data))
+
+        # シミュレーションのサンプリング周波数を計算
+        fs_fdtd = 1.0 / dt
+        print(f"  - FDTDのサンプリング周波数: {fs_fdtd:.0f} Hz")
+
+        # FDTDの周波数よりWAVの周波数が高い場合、リサンプリング（ダウンサンプル）
+        if fs_wav > fs_fdtd:
+            print("  - リサンプリングを実行します...")
+            duration = len(wav_data) / fs_wav
+            num_samples_new = int(duration * fs_fdtd)
+            wav_data = signal.resample(wav_data, num_samples_new)
+
+        # シミュレーションの長さに合わせて波形を調整（切り取り or ゼロ埋め）
+        if len(wav_data) > total_steps:
+            waveform = wav_data[:total_steps]
+        else:
+            waveform = np.zeros(total_steps)
+            waveform[:len(wav_data)] = wav_data
+        
+        # 最終的な振幅を調整
+        return waveform * amp_scale
+
+    except FileNotFoundError:
+        print(f"エラー: WAVファイルが見つかりません: {path}")
+        sys.exit()
+    except Exception as e:
+        print(f"エラー: WAVファイルの処理中に問題が発生しました: {e}")
+        sys.exit()
+
+# --- 複数音源の情報を格納するリストを準備 ---
+source_data_list = []
+print("\n--- 音源の準備 ---")
+# 全ての内部点のインデックスを一度だけ取得しておく（効率化）
+inside_indices = np.argwhere(inside_mask)
+if len(inside_indices) == 0:
+    print("エラー: 内部点（空気領域）が一つも見つかりませんでした。")
+    sys.exit()
+
+for i, source_info in enumerate(sources_to_load):
+    print(f"\n--- 音源 {i+1} の設定 ---")
+    stype = source_info["source_type"]
+    pos = source_info["position"]
+    amp = source_info.get("amp_scale", 1.0)
+    
+    # 1. 要求されたグリッドインデックスを計算
+    ix_req = int(round((pos[0] - grid_origin[0]) / dx))
+    iy_req = int(round((pos[1] - grid_origin[1]) / dy))
+    iz_req = int(round((pos[2] - grid_origin[2]) / dz))
+    print(f"要求されたインデックス: ({ix_req}, {iy_req}, {iz_req})")
+
+    # 2. 検証と自動補正
+    is_in_bounds = (0 <= ix_req < nx) and (0 <= iy_req < ny) and (0 <= iz_req < nz)
+    final_index = None
+
+    if is_in_bounds and inside_mask[ix_req, iy_req, iz_req]:
+        final_index = (ix_req, iy_req, iz_req)
+        print(f"-> 音源は正常に内部（空気領域内）に設定されました: {final_index}")
+    else:
+        if not is_in_bounds: print("警告: 要求された音源位置がグリッド範囲外です。")
+        else: print("警告: 要求された音源位置が形状の外部（空気領域外）です。")
+        print("-> 最も近い内部点（空気領域内）を自動的に探索します...")
+        
+        req_point = np.array([ix_req, iy_req, iz_req])
+        distances_sq = np.sum((inside_indices - req_point)**2, axis=1)
+        min_dist_idx = np.argmin(distances_sq)
+        final_index = tuple(inside_indices[min_dist_idx])
+        print(f"-> 新しいインデックスが設定されました: {final_index}")
+
+    # 3. 波形を生成
+    waveform = None
+    if stype == 'gaussian':
+        peak_time = source_info.get("peak_time", 0.0015)
+        sharpness = source_info.get("sharpness", 2e6)
+        waveform = generate_gaussian_pulse(tx, dt, peak_time, sharpness, amp)
+    elif stype == 'wav':
+        path = source_info.get("wav_path")
+        if not path: print(f"エラー: 音源{i+1} (wav) のパスが指定されていません。"); sys.exit()
+        waveform = load_and_resample_wav(path, tx, dt, amp)
+    
+    # 4. 最終的な音源情報をリストに追加
+    if waveform is not None:
+        source_data_list.append({"waveform": waveform, "index": final_index})
+### ▲▲▲ 音源準備ここまで ▲▲▲ ###
+
 
 # --- 計算条件の表示と確認 ---
 print("-" * 50)
@@ -234,27 +356,6 @@ else:
 points_per_wavelength = 20
 max_freq = c0 / (dx * points_per_wavelength)
 print(f"計算可能な最大周波数 (1波長あたり{points_per_wavelength}点): {max_freq:.2f} Hz")
-
-print("--- 音源設定 ---")
-ix_source_req = int(round((x_source - grid_origin[0]) / dx))
-iy_source_req = int(round((y_source - grid_origin[1]) / dy))
-iz_source_req = int(round((z_source - grid_origin[2]) / dz))
-print(f"要求された音源インデックス: ({ix_source_req}, {iy_source_req}, {iz_source_req})")
-is_in_bounds = (0 <= ix_source_req < nx) and (0 <= iy_source_req < ny) and (0 <= iz_source_req < nz)
-if not is_in_bounds or not inside_mask[ix_source_req, iy_source_req, iz_source_req]:
-    if not is_in_bounds: print("警告: 要求された音源位置がグリッド範囲外です。")
-    else: print("警告: 要求された音源位置が形状の外部（空気領域外）です。")
-    print("-> 最も近い内部点（空気領域内）を自動的に探索します...")
-    inside_indices = np.argwhere(inside_mask)
-    if len(inside_indices) == 0: print("エラー: 内部点が一つも見つかりませんでした。"); sys.exit()
-    req_point = np.array([ix_source_req, iy_source_req, iz_source_req])
-    distances_sq = np.sum((inside_indices - req_point)**2, axis=1)
-    min_dist_idx = np.argmin(distances_sq)
-    ix_source, iy_source, iz_source = inside_indices[min_dist_idx]
-    print(f"-> 新しい音源インデックスが設定されました: ({ix_source}, {iy_source}, {iz_source})")
-else:
-    ix_source, iy_source, iz_source = ix_source_req, iy_source_req, iz_source_req
-    print(f"-> 音源は正常に内部（空気領域内）に設定されました: ({ix_source}, {iy_source}, {iz_source})")
 
 print("-" * 50)
 input("Enterキーを押してデバックビューアーに移ります...")
@@ -299,10 +400,18 @@ if show_debug_visualization:
         geometries_to_show.append(boundary_vis)
         
     if show_source_point_in_debug:
-        source_coord = np.array([ix_source, iy_source, iz_source]) * np.array([dx, dy, dz]) + grid_origin
-        source_vis = tri.primitives.Sphere(radius=dx*2, center=source_coord)
-        source_vis.visual.face_colors = [255, 255, 0, 200]
-        geometries_to_show.append(source_vis)
+        # source_data_listをループして、全ての音源を可視化する
+        for source_data in source_data_list:
+            # 各音源のインデックスを取得
+            ix, iy, iz = source_data["index"]
+            
+            # 物理座標を計算
+            source_coord = np.array([ix, iy, iz]) * np.array([dx, dy, dz]) + grid_origin
+            
+            # 黄色い球として音源を表現
+            source_vis = tri.primitives.Sphere(radius=dx*3, center=source_coord)
+            source_vis.visual.face_colors = [255, 255, 0, 200] # 黄色
+            geometries_to_show.append(source_vis)
 
     if geometries_to_show:
         scene = tri.Scene(geometries_to_show)
@@ -374,7 +483,7 @@ vz = np.zeros((nx, ny, nz + 1))
 
 # --- 5. 可視化準備 ---
 fig, ax = plt.subplots(figsize=(8, 6))
-z_slice_index = iz_source
+z_slice_index = nz // 2  # 初期のZスライスインデックス
 if not (0 <= z_slice_index < nz):
     z_slice_index = int(nz/2)
 im = ax.imshow(p[:, :, z_slice_index].T, cmap='jet', origin='lower', extent=[x[0], x[-1], y[0], y[-1]], vmin=-0.1, vmax=0.1)
@@ -433,10 +542,15 @@ def update_frame(t):
     p[:, :, 0] = p[:, :, 1]
     p[:, :, -1] = p[:, :, -2]
 
-    # 順序4: 音源
-    if 0 <= ix_source < nx and 0 <= iy_source < ny and 0 <= iz_source < nz:
-        if t < len(pin) and inside_mask[ix_source, iy_source, iz_source]:
-            p[ix_source, iy_source, iz_source] += pin[t]
+    # 順序4: 音源の励振 (複数音源対応)
+    for source in source_data_list:
+        ix, iy, iz = source["index"]
+        pin_waveform = source["waveform"]
+        
+        # 音源位置が計算領域内かつ空気層であるかを確認
+        if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
+            if t < len(pin_waveform) and inside_mask[ix, iy, iz]:
+                p[ix, iy, iz] += pin_waveform[t]
     
     # 順序5: 可視化
     im.set_data(p[:, :, z_slice_index].T)
