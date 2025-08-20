@@ -41,6 +41,21 @@ sources_to_load = [
     },
 ]
 
+### 設定項目: マイク  ###
+# WAVファイルとして書き出したいサンプリング周波数 [Hz]
+rec_sampling_rate = 44100
+
+microphones = [
+    {
+        "position": [0.1, 0.1, 0.0],  # マイクの物理座標 [m]
+        "output_wav_path": "./mic1_output.wav"
+    },
+    {
+        "position": [-0.1, -0.1, 0.0],
+        "output_wav_path": "./mic2_output.wav"
+    },
+]
+
 # 計算領域全体の大きさ [m]
 x_span = 1.0
 y_span = 1.0
@@ -330,6 +345,46 @@ for i, source_info in enumerate(sources_to_load):
 ### ▲▲▲ 音源準備ここまで ▲▲▲ ###
 
 
+### ▼▼▼ マイクの準備 ▼▼▼ ###
+recorders = []
+print("\n--- マイクの準備 ---")
+
+# FDTDのネイティブなサンプリング周波数を計算
+fs_fdtd = 1.0 / dt
+print(f"FDTDのサンプリング周波数: {fs_fdtd:.0f} Hz")
+
+# 最終的な録音サンプリング周波数を決定
+actual_rec_fs = min(rec_sampling_rate, fs_fdtd)
+print(f"要求された録音周波数: {rec_sampling_rate} Hz -> 実際の録音周波数: {actual_rec_fs:.0f} Hz")
+if rec_sampling_rate > fs_fdtd:
+    print("  (要求値がFDTD周波数を上回るため、FDTD周波数にキャップされました)")
+
+# 録音の間引き間隔を計算
+rec_interval_steps = int(round(fs_fdtd / actual_rec_fs))
+# 録音される総サンプル数を計算
+num_rec_samples = len(range(0, tx, rec_interval_steps))
+
+for i, mic_info in enumerate(microphones):
+    pos = mic_info["position"]
+    path = mic_info["output_wav_path"]
+    ix = int(round((pos[0] - grid_origin[0]) / dx))
+    iy = int(round((pos[1] - grid_origin[1]) / dy))
+    iz = int(round((pos[2] - grid_origin[2]) / dz))
+    
+    if (0 <= ix < nx) and (0 <= iy < ny) and (0 <= iz < nz) and inside_mask[ix, iy, iz]:
+        recorders.append({
+            "index": (ix, iy, iz),
+            "path": path,
+            "history": np.zeros(num_rec_samples), # 録音用の配列サイズを修正
+            "rec_counter": 0 # 録音配列用のカウンター
+        })
+        print(f"- マイク {i+1} を位置 ({ix}, {iy}, {iz}) に設定しました。")
+    else:
+        print(f"警告: マイク {i+1} の位置は計算領域外または障害物内部のため、無視されます。")
+### ▲▲▲ マイク準備ここまで ▲▲▲ ###
+
+
+
 # --- 計算条件の表示と確認 ---
 print("-" * 50)
 print("--- シミュレーション条件の確認 ---")
@@ -551,6 +606,16 @@ def update_frame(t):
         if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
             if t < len(pin_waveform) and inside_mask[ix, iy, iz]:
                 p[ix, iy, iz] += pin_waveform[t]
+                
+    # マイクの録音
+    if t % rec_interval_steps == 0:
+        for recorder in recorders:
+            rec_idx = recorder["rec_counter"]
+            # 念のため、配列の範囲外に書き込まないようにチェック
+            if rec_idx < len(recorder["history"]):
+                ix, iy, iz = recorder["index"]
+                recorder["history"][rec_idx] = p[ix, iy, iz]
+                recorder["rec_counter"] += 1
     
     # 順序5: 可視化
     im.set_data(p[:, :, z_slice_index].T)
@@ -565,3 +630,30 @@ ani.save(output_path, writer=writer)
 progress_bar.close()
 plt.show()
 print(f"\nアニメーションを {output_path} に保存しました。")
+
+
+### ▼▼▼ WAVファイル書き出し ▼▼▼ ###
+print("\n--- WAVファイル書き出し ---")
+# 書き出すサンプリング周波数は、実際に使用されたもの
+sampling_rate = int(actual_rec_fs)
+
+for recorder in recorders:
+    path = recorder["path"]
+    # 実際に録音された部分だけを切り出して使用
+    pressure_history = recorder["history"][:recorder["rec_counter"]]
+    
+    if np.max(np.abs(pressure_history)) > 0:
+        # 最大絶対値で割り、[-1, 1]の範囲に正規化
+        normalized_pressure = pressure_history / np.max(np.abs(pressure_history))
+        # 16bit整数の範囲 [-32767, 32767] にスケーリング
+        data_to_write = np.int16(normalized_pressure * 32767)
+        
+        # WAVファイルとして書き出し
+        wavfile.write(path, sampling_rate, data_to_write)
+        print(f"- 録音データを {path} に保存しました。")
+    else:
+        print(f"- マイク {path} では音が観測されなかったため、ファイルは保存されませんでした。")
+### ▲▲▲ 書き出しここまで ▲▲▲ ###
+
+print("\n全ての処理が完了しました。")
+print("プログラムを終了します。")
