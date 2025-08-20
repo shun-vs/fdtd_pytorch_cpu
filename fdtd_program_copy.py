@@ -14,10 +14,10 @@ from scipy import signal      # リサンプリングに必要
 # シミュレーションで読み込む形状と吸音率をリストで定義
 # シミュレーション空間内に配置する「障害物」のSTLファイルをリストで定義
 shapes_to_load = [
-    {
-        "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_in.stl',
-        "alpha": 0.1, # この物体の表面全体の吸音率
-    },
+    # {
+    #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_in.stl',
+    #     "alpha": 0.5, # この物体の表面全体の吸音率
+    # },
     # {
     #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_out.stl',
     #     "alpha": 0.8,
@@ -26,22 +26,22 @@ shapes_to_load = [
 
 # --- 音源の設定 (リスト形式) ---
 sources_to_load = [
-    {
-        "source_type": "gaussian",
-        "position": [0.3, 0.0, 0.0],  # 物理座標 [m]
-        "peak_time": 0.001,           # パルスのピーク時刻 [s]
-        "sharpness": 5e5,             # パルスの鋭さ
-        "amp_scale": 1.0              # 振幅スケール
-    },
+    # {
+    #     "source_type": "gaussian",
+    #     "position": [0.3, 0.0, 0.0],  # 物理座標 [m]
+    #     "peak_time": 0.01,           # パルスのピーク時刻 [s]
+    #     "sharpness": 5e3,             # パルスの鋭さ
+    #     "amp_scale": 1.0              # 振幅スケール
+    # },
     {
         "source_type": "wav",
         "position": [-0.3, 0.0, 0.0], # 物理座標 [m]
         "wav_path": r'C:\Users\N-ONE\projects\input_sound_data\exit_announce.wav', # .wavファイルのパス
-        "amp_scale": 1.0              # 振幅スケール
+        "amp_scale": 0.8              # 振幅スケール
     },
 ]
 
-### 設定項目: マイク  ###
+### マイクの設定  ###
 # WAVファイルとして書き出したいサンプリング周波数 [Hz]
 rec_sampling_rate = 44100
 
@@ -56,6 +56,13 @@ microphones = [
     # },
 ]
 
+# --- PML吸収境界の設定 ---
+pml_settings = {
+    "layers": 16,       # PML層の厚さ（グリッド数）
+    "sigma_max": 400, # 減衰係数の最大値
+    "exponent": 3       # 減衰のテーパー乗数
+}
+
 # 計算領域全体の大きさ [m]
 x_span = 1.0
 y_span = 1.0
@@ -63,7 +70,7 @@ z_span = 1.0
 
 # グリッド、計算時間、出力ファイル
 dx = dy = dz = 0.01 # 空間ステップ [m]
-tmax = 1.0
+tmax = 1.0 # 計算時間 [s]
 output_path = r'D:\FDTD_animation\test\fdtd_animation_add_mic.mp4' # 出力ファイルのパス
 
 # --- デバッグ用設定 ---
@@ -72,7 +79,11 @@ view_mesh_as_wireframe = True # True:メッシュをワイヤーフレーム表�
 show_meshes_in_debug = True # 3Dビューアで境界点を表示するか
 show_boundary_points_in_debug = False # 3Dビューアで境界点（赤球）を表示するか
 show_source_point_in_debug = True   # 3Dビューアで音源点（黄球）を表示するか
-show_id_grid_animation = True # TrueにするとIDマスクのスライスビューアを起動
+show_id_grid_animation = False # TrueにするとIDマスクのスライスビューアを起動
+
+show_source_spectrum = True # Trueにすると全音源の周波数グラフを表示
+apply_lowpass_filter = True      # Trueにすると、計算可能周波数を超える音源成分をカットする
+show_filter_comparison_plot = False # Trueにすると、フィルター前後の波形をグラフで比較表示する
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
 
@@ -83,9 +94,72 @@ kappa = rho0 * c0 ** 2
 dt = np.floor(1 / (c0 * np.sqrt(1/dx**2 + 1/dy**2 + 1/dz**2)) * 1e13) / 1e13
 tx = int(round(tmax / dt))
 
-# 音源信号の設定（ガウシアンパルス）
-t0 = 0.0005
-pin = 10*np.exp(-3e7 * (np.arange(tx) * dt - t0)**2)
+
+# --- 周波数スペクトルの計算とグラフ表示 ---
+def plot_waveform_spectrum(waveform, dt, dx, c0, source_name, points_per_wavelength=20):
+    """
+    与えられた波形データの周波数スペクトルを計算し、グラフ表示する汎用関数
+    """
+    total_steps = len(waveform)
+    
+    # FFTを実行し、振幅スペクトルを計算
+    fft_result = np.fft.fft(waveform)
+    fft_amplitude = np.abs(fft_result)
+    
+    # 周波数軸を生成
+    freq_axis = np.fft.fftfreq(total_steps, d=dt)
+    
+    # 計算可能な最大周波数を計算
+    max_reliable_freq = c0 / (dx * points_per_wavelength)
+    
+    # グラフを描画
+    fig, ax = plt.subplots(figsize=(10, 5))
+    positive_freqs = freq_axis > 0
+    ax.plot(freq_axis[positive_freqs], fft_amplitude[positive_freqs], label=f'Spectrum of "{source_name}"')
+    ax.axvline(x=max_reliable_freq, color='r', linestyle='--', label=f'Max Reliable Freq ({max_reliable_freq:.0f} Hz)')
+    ax.set_title(f'Frequency Spectrum of Source: {source_name}')
+    ax.set_xlabel('Frequency [Hz]')
+    ax.set_ylabel('Amplitude')
+    ax.set_xlim(0, max_reliable_freq * 3)
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.legend()
+    plt.show()
+
+
+def filter_waveform(waveform, dt, dx, c0, points_per_wavelength=20):
+    """
+    FFT→ゼロ埋め→IFFTにより、波形にローパスフィルターを適用する関数
+    """
+    total_steps = len(waveform)
+    f_max = c0 / (dx * points_per_wavelength)
+    
+    # FFTを実行
+    fft_result = np.fft.fft(waveform)
+    freq_axis = np.fft.fftfreq(total_steps, d=dt)
+    
+    # f_maxを超える周波数成分をゼロにする
+    fft_result[np.abs(freq_axis) > f_max] = 0
+    
+    # 逆FFTを実行し、実数部を取り出す
+    filtered_waveform = np.fft.ifft(fft_result)
+    return np.real(filtered_waveform)
+
+
+def plot_waveform_comparison(original, filtered, dt, source_name):
+    """フィルター適用前後の波形を比較描画する関数"""
+    total_steps = len(original)
+    time_axis = np.arange(total_steps) * dt
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(time_axis, original, label='Original Waveform', alpha=0.7)
+    ax.plot(time_axis, filtered, label='Filtered Waveform', linestyle='--')
+    ax.set_title(f'Waveform Before/After Low-pass Filter: {source_name}')
+    ax.set_xlabel('Time [s]')
+    ax.set_ylabel('Amplitude')
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.legend()
+    plt.show()
+
 
 # --- 3. ジオメトリの準備 ---
 print("\n--- ジオメトリ準備開始 ---")
@@ -339,10 +413,35 @@ for i, source_info in enumerate(sources_to_load):
         if not path: print(f"エラー: 音源{i+1} (wav) のパスが指定されていません。"); sys.exit()
         waveform = load_and_resample_wav(path, tx, dt, amp)
     
-    # 4. 最終的な音源情報をリストに追加
+        # waveformが正常に生成された後
     if waveform is not None:
+        source_name = f"Source {i+1} ({stype})"
+        # ローパスフィルターを適用するか選択
+        if apply_lowpass_filter:
+            print(f"  - {source_name} にローパスフィルターを適用します...")
+            filtered_waveform = filter_waveform(waveform, dt, dx, c0)
+            
+            # フィルター前後の波形を比較表示するか選択
+            if show_filter_comparison_plot:
+                plot_waveform_comparison(waveform, filtered_waveform, dt, source_name)
+            
+            # 元の波形をフィルター後の波形で上書き
+            waveform = filtered_waveform
+            
         source_data_list.append({"waveform": waveform, "index": final_index})
+    
+    print("音源の準備が完了しました。")
 ### ▲▲▲ 音源準備ここまで ▲▲▲ ###
+
+if show_source_spectrum:
+    print("\n--- 各音源の周波数成分を分析 ---")
+    # 準備された全ての音源に対してループ
+    for i, source_data in enumerate(source_data_list):
+        waveform = source_data["waveform"]
+        # 設定リストから元の情報を取得して名前を付ける
+        source_info = sources_to_load[i]
+        source_name = f"Source {i+1} ({source_info['source_type']})"
+        plot_waveform_spectrum(waveform, dt, dx, c0, source_name)
 
 
 ### ▼▼▼ マイクの準備 ▼▼▼ ###
@@ -536,6 +635,48 @@ vx = np.zeros((nx + 1, ny, nz))
 vy = np.zeros((nx, ny + 1, nz))
 vz = np.zeros((nx, ny, nz + 1))
 
+### ▼▼▼ PMLの準備 ▼▼▼ ###
+print("\nPML吸収境界を準備します...")
+p_x = np.zeros(grid_shape, dtype=np.float32)
+p_y = np.zeros(grid_shape, dtype=np.float32)
+p_z = np.zeros(grid_shape, dtype=np.float32)
+
+# sigma (減衰係数) 配列の作成
+sigma_x = np.zeros(grid_shape, dtype=np.float32)
+sigma_y = np.zeros(grid_shape, dtype=np.float32)
+sigma_z = np.zeros(grid_shape, dtype=np.float32)
+
+pml_layers = pml_settings["layers"]
+if pml_layers > 0:
+    # 1Dの減衰プロファイルを作成
+    pml_thickness_m = pml_layers * dx # PMLの物理的な厚さ (dx=dy=dzと仮定)
+    d_profile = np.arange(pml_layers) * dx
+    sigma_profile = pml_settings["sigma_max"] * (d_profile / pml_thickness_m) ** pml_settings["exponent"]
+    
+    # 3Dのsigma配列にプロファイルを適用
+    # X方向
+    for i in range(pml_layers):
+        sigma_x[i, :, :] = sigma_profile[pml_layers - 1 - i]
+        sigma_x[nx - 1 - i, :, :] = sigma_profile[i]
+    # Y方向
+    for j in range(pml_layers):
+        sigma_y[:, j, :] = sigma_profile[pml_layers - 1 - j]
+        sigma_y[:, ny - 1 - j, :] = sigma_profile[j]
+    # Z方向
+    for k in range(pml_layers):
+        sigma_z[:, :, k] = sigma_profile[pml_layers - 1 - k]
+        sigma_z[:, :, nz - 1 - k] = sigma_profile[k]
+
+# PML更新係数を事前計算
+C1_x = (1 - sigma_x * dt / (2 * rho0)) / (1 + sigma_x * dt / (2 * rho0))
+C2_x = (-kappa * dt / rho0 / dx) / (1 + sigma_x * dt / (2 * rho0))
+C1_y = (1 - sigma_y * dt / (2 * rho0)) / (1 + sigma_y * dt / (2 * rho0))
+C2_y = (-kappa * dt / rho0 / dy) / (1 + sigma_y * dt / (2 * rho0))
+C1_z = (1 - sigma_z * dt / (2 * rho0)) / (1 + sigma_z * dt / (2 * rho0))
+C2_z = (-kappa * dt / rho0 / dz) / (1 + sigma_z * dt / (2 * rho0))
+print("PMLの準備が完了しました。")
+### ▲▲▲ PML準備ここまで ▲▲▲ ###
+
 # --- 5. 可視化準備 ---
 fig, ax = plt.subplots(figsize=(8, 6))
 z_slice_index = nz // 2  # 初期のZスライスインデックス
@@ -548,7 +689,7 @@ progress_bar = tqdm(total=tx, desc="Animating Frames")
 
 # --- 6. メインFDTDループ ---
 def update_frame(t):
-    global p, vx, vy, vz
+    global p, vx, vy, vz, p_x, p_y, p_z
     
     # 順序1: 粒子速度
     grad_p_x = (p[1:nx] - p[:nx-1]) / dx
@@ -558,54 +699,66 @@ def update_frame(t):
     grad_p_z = (p[:, :, 1:nz] - p[:, :, :nz-1]) / dz
     vz[:, :, 1:nz][vz_update_mask] -= (dt / rho0) * grad_p_z[vz_update_mask]
 
-    # 順序2: 境界条件 (ベクトル化)
-    # 有効な境界点における音圧を取得
-    p_at_boundary = p[p_b_indices_valid]
-    
-    # 法線方向の速度ベクトルを計算
-    v_normal_magnitude = p_at_boundary / Z_b_valid
-    v_normal_vectors = v_normal_magnitude[:, np.newaxis] * n_hats_b_valid
-    
-    # 対応する速度グリッドに一括で代入
-    if v_vec_indices_xp1.size > 0:
-        vx[vx_update_indices_p1] = v_normal_vectors[v_vec_indices_xp1, 0]
-    if v_vec_indices_xm1.size > 0:
-        vx[vx_update_indices_m1] = v_normal_vectors[v_vec_indices_xm1, 0]
-        
-    if v_vec_indices_yp1.size > 0:
-        vy[vy_update_indices_p1] = v_normal_vectors[v_vec_indices_yp1, 1]
-    if v_vec_indices_ym1.size > 0:
-        vy[vy_update_indices_m1] = v_normal_vectors[v_vec_indices_ym1, 1]
-        
-    if v_vec_indices_zp1.size > 0:
-        vz[vz_update_indices_p1] = v_normal_vectors[v_vec_indices_zp1, 2]
-    if v_vec_indices_zm1.size > 0:
-        vz[vz_update_indices_m1] = v_normal_vectors[v_vec_indices_zm1, 2]
+    # 順序2: 境界条件 (法線ベクトルを考慮した安定化更新式)
+    for i, j, k in zip(*np.where(boundary_mask)):
+        Z = impedance_grid[i, j, k]
+        if not np.isfinite(Z):
+            continue
+            
+        normal = normals_voxcel[i, j, k]
+        norm_mag = np.linalg.norm(normal)
+        if norm_mag < 1e-6:
+            continue
+        n_hat = normal / norm_mag
 
-    # 順序3: 音圧
-    div_v_x = (vx[1:nx+1] - vx[:nx]) / dx
-    div_v_y = (vy[:, 1:ny+1] - vy[:, :ny]) / dy
-    div_v_z = (vz[:, :, 1:nz+1] - vz[:, :, :nz]) / dz
-    divergence = div_v_x + div_v_y + div_v_z
-    p[p_update_mask] -= kappa * dt * divergence[p_update_mask]
-    
-    # 計算領域の外周を完全吸収境界（Murの1次）とする
-    p[0, :, :] = p[1, :, :]
-    p[-1, :, :] = p[-2, :, :]
-    p[:, 0, :] = p[:, 1, :]
-    p[:, -1, :] = p[:, -2, :]
-    p[:, :, 0] = p[:, :, 1]
-    p[:, :, -1] = p[:, :, -2]
+        # 境界での速度ベクトルを、周囲の速度点から補間して計算
+        v_vec = np.array([
+            0.5 * (vx[i, j, k] + vx[i + 1, j, k]),
+            0.5 * (vy[i, j, k] + vy[i, j + 1, k]),
+            0.5 * (vz[i, j, k] + vz[i, j + 1, k])
+        ])
+
+        # 速度を法線方向(vn)と接線方向(vt)に分解
+        vn_old = np.dot(v_vec, n_hat)
+        vt_old = v_vec - vn_old * n_hat
+
+        # 法線方向の速度成分に対してのみ、安定な1Dの更新式を適用
+        # 参照する音圧は、内側(空気側)のp[i,j,k]とする
+        coeff = (rho0 * c0 - Z) / (rho0 * c0 + Z)
+        vn_new = vn_old * coeff + (1 - coeff) * p[i, j, k] / (rho0 * c0)
+
+        # 新しい速度ベクトルを再合成
+        v_new_vec = vn_new * n_hat + vt_old
+        
+        # 再合成した速度ベクトルを、隣接する固体側の速度点に設定
+        # (これにより、波が固体側にエネルギーを伝達（吸収）する様子を模擬する)
+        if i < nx - 1 and solid_mask[i + 1, j, k]: vx[i + 1, j, k] = v_new_vec[0]
+        if i > 0 and solid_mask[i - 1, j, k]:    vx[i, j, k] = v_new_vec[0]
+        if j < ny - 1 and solid_mask[i, j + 1, k]: vy[i, j + 1, k] = v_new_vec[1]
+        if j > 0 and solid_mask[i, j - 1, k]:    vy[i, j, k] = v_new_vec[1]
+        if k < nz - 1 and solid_mask[i, j, k + 1]: vz[i, j, k + 1] = v_new_vec[2]
+        if k > 0 and solid_mask[i, j, k - 1]:    vz[i, j, k] = v_new_vec[2]
+
+    # 順序3: 音圧更新 (PML)
+    div_v_x = (vx[1:nx+1] - vx[:nx])
+    div_v_y = (vy[:, 1:ny+1] - vy[:, :ny])
+    div_v_z = (vz[:, :, 1:nz+1] - vz[:, :, :nz])
+    # 分割音圧場を更新
+    p_x = C1_x * p_x + C2_x * div_v_x
+    p_y = C1_y * p_y + C2_y * div_v_y
+    p_z = C1_z * p_z + C2_z * div_v_z
+    # 全音圧場を合成
+    p = p_x + p_y + p_z
+    # 障害物内部の音圧をゼロにする
+    p[solid_mask] = 0
 
     # 順序4: 音源の励振 (複数音源対応)
     for source in source_data_list:
         ix, iy, iz = source["index"]
         pin_waveform = source["waveform"]
         
-        # 音源位置が計算領域内かつ空気層であるかを確認
-        if 0 <= ix < nx and 0 <= iy < ny and 0 <= iz < nz:
-            if t < len(pin_waveform) and inside_mask[ix, iy, iz]:
-                p[ix, iy, iz] += pin_waveform[t]
+        if t < len(pin_waveform) and inside_mask[ix, iy, iz]:
+            p[ix, iy, iz] += pin_waveform[t]
                 
     # マイクの録音
     if t % rec_interval_steps == 0:
