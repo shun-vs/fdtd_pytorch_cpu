@@ -1,4 +1,6 @@
-    # {
-    #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_in.stl',
-    #     "alpha": 0.5, # この物体の表面全体の吸音率
-    # },
+        "source_type": "gaussian",
+        "position": [0.0, 0.0, 0.0],  # 物理座標 [m]
+        "peak_time": 0.03,           # パルスのピーク時刻 [s]
+        "sharpness": 5e5,             # パルスの鋭さ
+        "amp_scale": 1000.0,              # 振幅スケール
+        "apply_filter": True  # ガウシアンにはフィルターを適用
