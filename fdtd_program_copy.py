@@ -30,13 +30,13 @@ sources_to_load = [
     #     "source_type": "gaussian",
     #     "position": [0.3, 0.0, 0.0],  # 物理座標 [m]
     #     "peak_time": 0.01,           # パルスのピーク時刻 [s]
-    #     "sharpness": 5e3,             # パルスの鋭さ
-    #     "amp_scale": 1.0              # 振幅スケール
+    #     "sharpness": 5e5,             # パルスの鋭さ
+    #     "amp_scale": 50.0              # 振幅スケール
     # },
     {
         "source_type": "wav",
         "position": [-0.3, 0.0, 0.0], # 物理座標 [m]
-        "wav_path": r'C:\Users\N-ONE\projects\input_sound_data\exit_announce.wav', # .wavファイルのパス
+        "wav_path": r'C:\Users\N-ONE\projects\input_sound_data\exponent_sweep_generator(20to20000[Hz])_4times_40sconds.wav', # .wavファイルのパス
         "amp_scale": 0.8              # 振幅スケール
     },
 ]
@@ -58,9 +58,9 @@ microphones = [
 
 # --- PML吸収境界の設定 ---
 pml_settings = {
-    "layers": 16,       # PML層の厚さ（グリッド数）
+    "layers": 25,       # PML層の厚さ（グリッド数）
     "sigma_max": 400, # 減衰係数の最大値
-    "exponent": 3       # 減衰のテーパー乗数
+    "exponent": 4       # 減衰のテーパー乗数
 }
 
 # 計算領域全体の大きさ [m]
@@ -70,8 +70,8 @@ z_span = 1.0
 
 # グリッド、計算時間、出力ファイル
 dx = dy = dz = 0.01 # 空間ステップ [m]
-tmax = 0.1 # 計算時間 [s]
-output_path = r'D:\FDTD_animation\test\fdtd_animation_add_mic.mp4' # 出力ファイルのパス
+tmax = 0.3 # 計算時間 [s]
+output_path = r'D:\FDTD_animation\test\fdtd_animation_tsp_PML25-400-4.mp4' # 出力ファイルのパス
 
 # --- デバッグ用設定 ---
 show_debug_visualization = False # Trueにするとデバッグ用の3Dビューアを起動
@@ -83,7 +83,7 @@ show_id_grid_animation = False # TrueにするとIDマスクのスライスビ�
 
 show_source_spectrum = True # Trueにすると全音源の周波数グラフを表示
 apply_lowpass_filter = True      # Trueにすると、計算可能周波数を超える音源成分をカットする
-show_filter_comparison_plot = False # Trueにすると、フィルター前後の波形をグラフで比較表示する
+show_filter_comparison_plot = True # Trueにすると、フィルター前後の波形をグラフで比較表示する
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
 
@@ -226,7 +226,6 @@ boundary_mask = inside_mask & ~eroded_mask
 
 # 境界プロパティのマッピング
 print("境界プロパティをマッピングします...")
-normals_voxcel = np.zeros((nx, ny, nz, 3))
 impedance_grid = np.full(grid_shape, np.inf)
 boundary_voxels_indices = np.argwhere(boundary_mask)
 id_to_impedance_map = {data["id"]: data["impedance"] for data in all_meshes_data}
@@ -249,17 +248,26 @@ for idx, (i, j, k) in enumerate(tqdm(boundary_voxels_indices, desc="Finding Boun
 impedance_values = np.array([id_to_impedance_map.get(oid, np.inf) for oid in boundary_partner_ids])
 impedance_grid[boundary_mask] = impedance_values
 
-for data in tqdm(all_meshes_data, desc="Mapping Normals"):
-    mesh = data["mesh"]
-    obj_id = data["id"]
+# --- グリッド構造に基づく、数値的に安定な法線の計算 ---
+print("グリッド構造に基づき、軸に沿った法線ベクトルを算出します...")
+normals_voxcel = np.zeros((nx, ny, nz, 3))
+for i, j, k in tqdm(boundary_voxels_indices, desc="Calculating Axis-Aligned Normals"):
+    # 各境界点（空気セル）の法線を、隣接する固体セルの方向から計算
+    # 法線は、空気セルから固体セルへ向かう方向として定義
+    normal = np.zeros(3)
+    if i < nx - 1 and solid_mask[i + 1, j, k]: normal[0] += 1.0
+    if i > 0 and solid_mask[i - 1, j, k]:    normal[0] -= 1.0
+    if j < ny - 1 and solid_mask[i, j + 1, k]: normal[1] += 1.0
+    if j > 0 and solid_mask[i, j - 1, k]:    normal[1] -= 1.0
+    if k < nz - 1 and solid_mask[i, j, k + 1]: normal[2] += 1.0
+    if k > 0 and solid_mask[i, j, k - 1]:    normal[2] -= 1.0
     
-    current_obj_boundary_indices = boundary_voxels_indices[boundary_partner_ids == obj_id]
-    if len(current_obj_boundary_indices) == 0: continue
-        
-    current_obj_boundary_coords = current_obj_boundary_indices * np.array([dx, dy, dz]) + grid_origin
-    _, _, face_ids = tri.proximity.closest_point(mesh, current_obj_boundary_coords)
-    indices_tuple = (current_obj_boundary_indices[:, 0], current_obj_boundary_indices[:, 1], current_obj_boundary_indices[:, 2])
-    normals_voxcel[indices_tuple] = mesh.face_normals[face_ids]
+    # 正規化して単位ベクトルにする
+    norm_mag = np.linalg.norm(normal)
+    if norm_mag > 0:
+        normals_voxcel[i, j, k] = normal / norm_mag
+
+print("ボクセル化とプロパティマッピングが完了しました。")
 
 
 # --- 境界条件の高速化準備 (ベクトル化) ---
@@ -318,42 +326,39 @@ def generate_gaussian_pulse(total_steps, dt, peak_time, sharpness, amp_scale=1.0
     print("音源タイプ: ガウシアンパルス")
     time_steps = np.arange(total_steps) * dt
     pulse = np.exp(-sharpness * (time_steps - peak_time)**2)
-    return pulse
+    return pulse* amp_scale
 
 def load_and_resample_wav(path, total_steps, dt, amp_scale=1.0):
-    """WAVファイルを読み込み、必要に応じてリサンプリングする関数"""
+    """WAVファイルを読み込み、必要に応じてリサンプリング（アップ/ダウン）する関数"""
     print(f"音源タイプ: WAVファイル ({path})")
     try:
-        # WAVファイルを読み込み
         fs_wav, wav_data = wavfile.read(path)
         print(f"  - 元のサンプリング周波数: {fs_wav} Hz")
 
-        # ステレオの場合はモノラルに変換
-        if wav_data.ndim > 1:
-            wav_data = wav_data.mean(axis=1)
-        
-        # 振幅を[-1, 1]の範囲に正規化
+        if wav_data.ndim > 1: wav_data = wav_data.mean(axis=1)
         wav_data = wav_data / np.max(np.abs(wav_data))
 
-        # シミュレーションのサンプリング周波数を計算
         fs_fdtd = 1.0 / dt
         print(f"  - FDTDのサンプリング周波数: {fs_fdtd:.0f} Hz")
 
-        # FDTDの周波数よりWAVの周波数が高い場合、リサンプリング（ダウンサンプル）
-        if fs_wav > fs_fdtd:
-            print("  - リサンプリングを実行します...")
+        # WAVとFDTDの周波数が異なる場合は、常にリサンプリングを実行
+        if fs_wav != int(fs_fdtd):
+            if fs_wav > fs_fdtd:
+                print("  - ダウンサンプリングを実行します...")
+            else:
+                print("  - アップサンプリングを実行します...")
+            
             duration = len(wav_data) / fs_wav
             num_samples_new = int(duration * fs_fdtd)
             wav_data = signal.resample(wav_data, num_samples_new)
 
-        # シミュレーションの長さに合わせて波形を調整（切り取り or ゼロ埋め）
+        # シミュレーションの長さに合わせて波形を調整
+        waveform = np.zeros(total_steps)
         if len(wav_data) > total_steps:
             waveform = wav_data[:total_steps]
         else:
-            waveform = np.zeros(total_steps)
             waveform[:len(wav_data)] = wav_data
         
-        # 最終的な振幅を調整
         return waveform * amp_scale
 
     except FileNotFoundError:
@@ -668,12 +673,12 @@ if pml_layers > 0:
         sigma_z[:, :, nz - 1 - k] = sigma_profile[k]
 
 # PML更新係数を事前計算
-C1_x = (1 - sigma_x * dt / (2 * rho0)) / (1 + sigma_x * dt / (2 * rho0))
-C2_x = (-kappa * dt / rho0 / dx) / (1 + sigma_x * dt / (2 * rho0))
-C1_y = (1 - sigma_y * dt / (2 * rho0)) / (1 + sigma_y * dt / (2 * rho0))
-C2_y = (-kappa * dt / rho0 / dy) / (1 + sigma_y * dt / (2 * rho0))
-C1_z = (1 - sigma_z * dt / (2 * rho0)) / (1 + sigma_z * dt / (2 * rho0))
-C2_z = (-kappa * dt / rho0 / dz) / (1 + sigma_z * dt / (2 * rho0))
+C1_x = (2 - dt * sigma_x) / (2 + dt * sigma_x)
+C2_x = (-2 * kappa * dt / dx) / (2 + dt * sigma_x)
+C1_y = (2 - dt * sigma_y) / (2 + dt * sigma_y)
+C2_y = (-2 * kappa * dt / dy) / (2 + dt * sigma_y)
+C1_z = (2 - dt * sigma_z) / (2 + dt * sigma_z)
+C2_z = (-2 * kappa * dt / dz) / (2 + dt * sigma_z)
 print("PMLの準備が完了しました。")
 
 # --- PML領域外かを判定するマスクを作成 ---
@@ -702,80 +707,45 @@ def update_frame(t):
     grad_p_z = (p[:, :, 1:nz] - p[:, :, :nz-1]) / dz
     vz[:, :, 1:nz][vz_update_mask] -= (dt / rho0) * grad_p_z[vz_update_mask]
 
-    # 順序2: 境界条件
-    # PML層の外側にある境界点のみをループの対象にする
-    effective_boundary_indices = np.where(boundary_mask & is_not_in_pml)
-    for i, j, k in zip(*effective_boundary_indices):
-        Z = impedance_grid[i, j, k]
-        if not np.isfinite(Z):
-            continue
-            
-        normal = normals_voxcel[i, j, k]
-        norm_mag = np.linalg.norm(normal)
-        if norm_mag < 1e-6:
-            continue
-        n_hat = normal / norm_mag
-
-        # 境界での速度ベクトルを、周囲の速度点から補間して計算
-        v_vec = np.array([
-            0.5 * (vx[i, j, k] + vx[i + 1, j, k]),
-            0.5 * (vy[i, j, k] + vy[i, j + 1, k]),
-            0.5 * (vz[i, j, k] + vz[i, j + 1, k])
-        ])
-
-        # 速度を法線方向(vn)と接線方向(vt)に分解
-        vn_old = np.dot(v_vec, n_hat)
-        vt_old = v_vec - vn_old * n_hat
-
-        # 法線方向の速度成分に対してのみ、安定な1Dの更新式を適用
-        # 参照する音圧は、内側(空気側)のp[i,j,k]とする
-        coeff = (rho0 * c0 - Z) / (rho0 * c0 + Z)
-        vn_new = vn_old * coeff + (1 - coeff) * p[i, j, k] / (rho0 * c0)
-
-        # 新しい速度ベクトルを再合成
-        v_new_vec = vn_new * n_hat + vt_old
-        
-        # 再合成した速度ベクトルを、隣接する固体側の速度点に設定
-        # (これにより、波が固体側にエネルギーを伝達（吸収）する様子を模擬する)
-        if i < nx - 1 and solid_mask[i + 1, j, k]: vx[i + 1, j, k] = v_new_vec[0]
-        if i > 0 and solid_mask[i - 1, j, k]:    vx[i, j, k] = v_new_vec[0]
-        if j < ny - 1 and solid_mask[i, j + 1, k]: vy[i, j + 1, k] = v_new_vec[1]
-        if j > 0 and solid_mask[i, j - 1, k]:    vy[i, j, k] = v_new_vec[1]
-        if k < nz - 1 and solid_mask[i, j, k + 1]: vz[i, j, k + 1] = v_new_vec[2]
-        if k > 0 and solid_mask[i, j, k - 1]:    vz[i, j, k] = v_new_vec[2]
-
-    # 順序3: 音圧更新 (PML)
-    div_v_x = (vx[1:nx+1] - vx[:nx])
-    div_v_y = (vy[:, 1:ny+1] - vy[:, :ny])
-    div_v_z = (vz[:, :, 1:nz+1] - vz[:, :, :nz])
-    # 分割音圧場を更新
-    p_x = C1_x * p_x + C2_x * div_v_x
-    p_y = C1_y * p_y + C2_y * div_v_y
-    p_z = C1_z * p_z + C2_z * div_v_z
-    # 全音圧場を合成
-    p = p_x + p_y + p_z
-    # 障害物内部の音圧をゼロにする
-    p[solid_mask] = 0
-
-    # 順序4: 音源の励振 (複数音源対応)
+    # 順序2: 障害物の境界条件 (安定な剛体モデル)
+    vx[1:nx][inside_mask[:nx-1] != inside_mask[1:nx]] = 0
+    vy[:, 1:ny][inside_mask[:,:ny-1] != inside_mask[:,1:ny]] = 0
+    vz[:, :, 1:nz][inside_mask[:,:,:nz-1] != inside_mask[:,:,1:nz]] = 0
+    
+    # 順序3: 音源の励振 (ベクトル化)
+    # 全音源からの寄与を一時的な配列にまとめる
+    p_source_add = np.zeros(grid_shape)
     for source in source_data_list:
         ix, iy, iz = source["index"]
         pin_waveform = source["waveform"]
-        
         if t < len(pin_waveform) and inside_mask[ix, iy, iz]:
-            p[ix, iy, iz] += pin_waveform[t]
+            # ここでは kappa * dt を掛けるのが物理的に正しい注入法
+            p_source_add[ix, iy, iz] += pin_waveform[t] * kappa * dt
+
+    # 順序4: 音圧更新 (PML)
+    div_v_x = (vx[1:nx+1] - vx[:nx])
+    div_v_y = (vy[:, 1:ny+1] - vy[:, :ny])
+    div_v_z = (vz[:, :, 1:nz+1] - vz[:, :, :nz])
+    
+    # 音源からの寄与を加算してから、PMLの更新を行う
+    p_x = C1_x * p_x + C2_x * div_v_x + p_source_add
+    p_y = C1_y * p_y + C2_y * div_v_y
+    p_z = C1_z * p_z + C2_z * div_v_z
+    
+    p = p_x + p_y + p_z
+    p[solid_mask] = 0
+
                 
-    # マイクの録音
+    # 順序5: マイクの録音
     if t % rec_interval_steps == 0:
         for recorder in recorders:
             rec_idx = recorder["rec_counter"]
-            # 念のため、配列の範囲外に書き込まないようにチェック
             if rec_idx < len(recorder["history"]):
                 ix, iy, iz = recorder["index"]
                 recorder["history"][rec_idx] = p[ix, iy, iz]
                 recorder["rec_counter"] += 1
     
-    # 順序5: 可視化
+    # 順序6: 可視化
     im.set_data(p[:, :, z_slice_index].T)
     ax.set_title(f'Pressure distribution at t = {t * dt:.6f} s')
     progress_bar.update(1)
