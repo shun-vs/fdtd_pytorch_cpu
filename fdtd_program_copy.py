@@ -32,12 +32,14 @@ sources_to_load = [
     #     "peak_time": 0.01,           # パルスのピーク時刻 [s]
     #     "sharpness": 5e5,             # パルスの鋭さ
     #     "amp_scale": 50.0              # 振幅スケール
+    #     "apply_filter": True  # ガウシアンにはフィルターを適用
     # },
     {
         "source_type": "wav",
         "position": [-0.3, 0.0, 0.0], # 物理座標 [m]
         "wav_path": r'C:\Users\N-ONE\projects\input_sound_data\exponent_sweep_generator(20to20000[Hz])_4times_40sconds.wav', # .wavファイルのパス
-        "amp_scale": 0.8              # 振幅スケール
+        "amp_scale": 10,              # 振幅スケール
+        "apply_filter": False  # WAVファイルにはフィルターを適用
     },
 ]
 
@@ -70,7 +72,7 @@ z_span = 1.0
 
 # グリッド、計算時間、出力ファイル
 dx = dy = dz = 0.01 # 空間ステップ [m]
-tmax = 0.3 # 計算時間 [s]
+tmax = 0.1 # 計算時間 [s]
 output_path = r'D:\FDTD_animation\test\fdtd_animation_tsp_PML25-400-4.mp4' # 出力ファイルのパス
 
 # --- デバッグ用設定 ---
@@ -82,7 +84,6 @@ show_source_point_in_debug = True   # 3Dビューアで音源点（黄球）を�
 show_id_grid_animation = False # TrueにするとIDマスクのスライスビューアを起動
 
 show_source_spectrum = True # Trueにすると全音源の周波数グラフを表示
-apply_lowpass_filter = True      # Trueにすると、計算可能周波数を超える音源成分をカットする
 show_filter_comparison_plot = True # Trueにすると、フィルター前後の波形をグラフで比較表示する
 ### ▲▲▲ 設定はここまで ▲▲▲ ###
 
@@ -329,35 +330,35 @@ def generate_gaussian_pulse(total_steps, dt, peak_time, sharpness, amp_scale=1.0
     return pulse* amp_scale
 
 def load_and_resample_wav(path, total_steps, dt, amp_scale=1.0):
-    """WAVファイルを読み込み、必要に応じてリサンプリング（アップ/ダウン）する関数"""
+    """WAVファイルを読み込み、必要な部分を切り出してからリサンプリングする関数"""
     print(f"音源タイプ: WAVファイル ({path})")
     try:
-        fs_wav, wav_data = wavfile.read(path)
+        fs_wav, wav_data_full = wavfile.read(path)
         print(f"  - 元のサンプリング周波数: {fs_wav} Hz")
 
-        if wav_data.ndim > 1: wav_data = wav_data.mean(axis=1)
-        wav_data = wav_data / np.max(np.abs(wav_data))
+        if wav_data_full.ndim > 1:
+            wav_data_full = wav_data_full.mean(axis=1)
 
         fs_fdtd = 1.0 / dt
         print(f"  - FDTDのサンプリング周波数: {fs_fdtd:.0f} Hz")
+        
+        # 1. シミュレーションに必要な時間分のサンプル数を、元のWAVから計算
+        sim_duration = total_steps * dt
+        num_samples_from_original = int(sim_duration * fs_wav)
 
-        # WAVとFDTDの周波数が異なる場合は、常にリサンプリングを実行
-        if fs_wav != int(fs_fdtd):
-            if fs_wav > fs_fdtd:
-                print("  - ダウンサンプリングを実行します...")
-            else:
-                print("  - アップサンプリングを実行します...")
-            
-            duration = len(wav_data) / fs_wav
-            num_samples_new = int(duration * fs_fdtd)
-            wav_data = signal.resample(wav_data, num_samples_new)
+        # 2. 元のWAVデータから必要な部分だけを切り出す
+        wav_segment = wav_data_full[:num_samples_from_original]
 
-        # シミュレーションの長さに合わせて波形を調整
-        waveform = np.zeros(total_steps)
-        if len(wav_data) > total_steps:
-            waveform = wav_data[:total_steps]
-        else:
-            waveform[:len(wav_data)] = wav_data
+        # 3. 切り出した部分がほぼ無音でないか確認
+        if np.max(np.abs(wav_segment)) < 1e-6:
+            print("  - 警告: WAVファイルの該当区間はほぼ無音です。")
+            return np.zeros(total_steps)
+
+        # 4. 切り出した部分を正規化する
+        normalized_segment = wav_segment / np.max(np.abs(wav_segment))
+        
+        # 5. 正規化した短い波形を、FDTDのステップ数に合わせてリサンプリング
+        waveform = signal.resample(normalized_segment, total_steps)
         
         return waveform * amp_scale
 
@@ -421,17 +422,18 @@ for i, source_info in enumerate(sources_to_load):
         # waveformが正常に生成された後
     if waveform is not None:
         source_name = f"Source {i+1} ({stype})"
-        # ローパスフィルターを適用するか選択
-        if apply_lowpass_filter:
+        # 各音源の設定に基づいてフィルターを適用するか判断
+        if source_info.get("apply_filter", False): # デフォルトはFalse
             print(f"  - {source_name} にローパスフィルターを適用します...")
             filtered_waveform = filter_waveform(waveform, dt, dx, c0)
             
-            # フィルター前後の波形を比較表示するか選択
+            # フィルター前後の波形を比較表示 (これも設定に含めても良い)
             if show_filter_comparison_plot:
                 plot_waveform_comparison(waveform, filtered_waveform, dt, source_name)
             
-            # 元の波形をフィルター後の波形で上書き
             waveform = filtered_waveform
+        else:
+            print(f"  - {source_name} のフィルター適用はスキップされました。")
             
         source_data_list.append({"waveform": waveform, "index": final_index})
     
