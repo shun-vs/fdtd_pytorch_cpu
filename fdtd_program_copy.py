@@ -14,10 +14,10 @@ from scipy import signal      # リサンプリングに必要
 # シミュレーションで読み込む形状と吸音率をリストで定義
 # シミュレーション空間内に配置する「障害物」のSTLファイルをリストで定義
 shapes_to_load = [
-    # {
-    #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_in.stl',
-    #     "alpha": 0.5, # この物体の表面全体の吸音率
-    # },
+    {
+        "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_in.stl',
+        "alpha": 0.5, # この物体の表面全体の吸音率
+    },
     # {
     #     "stl_path": r'C:\Users\N-ONE\projects\shape_data\SampleShape1_out.stl',
     #     "alpha": 0.8,
@@ -70,7 +70,7 @@ z_span = 1.0
 
 # グリッド、計算時間、出力ファイル
 dx = dy = dz = 0.01 # 空間ステップ [m]
-tmax = 1.0 # 計算時間 [s]
+tmax = 0.1 # 計算時間 [s]
 output_path = r'D:\FDTD_animation\test\fdtd_animation_add_mic.mp4' # 出力ファイルのパス
 
 # --- デバッグ用設定 ---
@@ -675,6 +675,9 @@ C2_y = (-kappa * dt / rho0 / dy) / (1 + sigma_y * dt / (2 * rho0))
 C1_z = (1 - sigma_z * dt / (2 * rho0)) / (1 + sigma_z * dt / (2 * rho0))
 C2_z = (-kappa * dt / rho0 / dz) / (1 + sigma_z * dt / (2 * rho0))
 print("PMLの準備が完了しました。")
+
+# --- PML領域外かを判定するマスクを作成 ---
+is_not_in_pml = (sigma_x == 0) & (sigma_y == 0) & (sigma_z == 0)
 ### ▲▲▲ PML準備ここまで ▲▲▲ ###
 
 # --- 5. 可視化準備 ---
@@ -699,8 +702,10 @@ def update_frame(t):
     grad_p_z = (p[:, :, 1:nz] - p[:, :, :nz-1]) / dz
     vz[:, :, 1:nz][vz_update_mask] -= (dt / rho0) * grad_p_z[vz_update_mask]
 
-    # 順序2: 境界条件 (法線ベクトルを考慮した安定化更新式)
-    for i, j, k in zip(*np.where(boundary_mask)):
+    # 順序2: 境界条件
+    # PML層の外側にある境界点のみをループの対象にする
+    effective_boundary_indices = np.where(boundary_mask & is_not_in_pml)
+    for i, j, k in zip(*effective_boundary_indices):
         Z = impedance_grid[i, j, k]
         if not np.isfinite(Z):
             continue
